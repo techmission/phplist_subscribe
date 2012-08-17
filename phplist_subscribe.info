@@ -1,0 +1,4 @@
+name = "PHPList Subscribe"
+description = "A lightweight module providing a block for subscribing to PHPList lists."
+package = "Custom"
+core = 6.x
