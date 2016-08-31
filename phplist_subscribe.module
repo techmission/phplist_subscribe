@@ -11,44 +11,66 @@
 
 // PHPList database.
 // @todo: Allow users to set in settings form.
-define('PHPLIST_DBNAME', 'phplist_test');
+define('PHPLIST_DBNAME', 'phplist');
   
 // Error reporting.
 define('PHPLIST_LIST_RETURN_CODE_SUCCESS', 0);
 define('PHPLIST_LIST_RETURN_CODE_ERROR', 1);
 define('PHPLIST_LIST_RETURN_CODE_ALREADY_SUBSCRIBED', 2);
+
+// ID of list to which to subscribe
 define('PHPLIST_LIST_LIST_ID', 2);
 
-// Set the module in debug mode. Switch to FALSE to stop printing error messages.
+// Message texts for user history table.
+define('TEXT_SUMMARY', 'Subscription');
+define('TEXT_DETAIL', 'Subscribe page: 1   List Membership:   * ChristianVolunteering Marketing');
+
+// Site homepage URL.
+define('SITE_HOMEPAGE', 'home');
+
+// Set the module in debug mode. 
+// Switch to FALSE to stop printing error messages.
 define('PHPLIST_MODULE_IN_DEBUG', TRUE); 
 
 /**
- * Implements hook_block().
+ * Implements hook_init().
  */
-function phplist_subscribe_block($op = 'list', $delta = 0, $edit = array()) {
-  if ($op == 'list') {
-    $blocks[0] = array(
-      'info' => t('PHPList Subscribe'),
-    );
-    return $blocks;
+function phplist_subscribe_init() {
+  // add a custom JS file to change the destination of the form on tm homepage
+  if(arg(0) == SITE_HOMEPAGE) {
+    drupal_add_js(drupal_get_path('module', 'phplist_subscribe') . '/phplist_subscribe.js', array('type' => 'file', 'scope' => 'footer', 'every_page' => FALSE, 'cache' => FALSE, 'preprocess' => FALSE));    
   }
-  else if ($op == 'view') {
-    switch ($delta) {
-      case 0:
-        $block = array(
-          'subject' => t('Subscribe to Our Mailing List'),
-          'content' => drupal_get_form('phplist_subscribe_email_form'),
-        );
-	    break;
-    }
-    return $block;
+}
+
+/**
+ * Implements hook_block_info().
+ */
+function phplist_subscribe_block_info() {
+  $blocks[0] = array(
+    'info' => t('PHPList Subscribe'),
+  );
+  return $blocks;
+}
+
+/**
+ * Implements hook_block_view().
+ */
+function phplist_subscribe_block_view($delta = 0) {
+  switch ($delta) {
+    case 0:
+      $block = array(
+        'subject' => t('Subscribe to Our Mailing List'),
+        'content' => drupal_get_form('phplist_subscribe_email_form'),
+      );
+      break;
   }
+  return $block;
 }
 
 /**
  * FormAPI form for subscribing to PHPList list.
  */
-function phplist_subscribe_email_form(&$form_state) {
+function phplist_subscribe_email_form($form, &$form_state) {
  $form = array(
    'email' => array(
      '#type' => 'textfield',
@@ -60,6 +82,8 @@ function phplist_subscribe_email_form(&$form_state) {
      '#type' => 'submit',
      '#value' => t('Subscribe'),
    ),
+   '#validate' => array('phplist_subscribe_email_form_validate'),
+   '#submit' => array('phplist_subscribe_email_form_submit'),
  );
  return $form;
 }
@@ -77,10 +101,10 @@ function phplist_subscribe_email_form_validate($form, &$form_state) {
  * Submit handler for subscribing to PHPList list.
  */
 function phplist_subscribe_email_form_submit($form, &$form_state) {
- // Subscribe to list.
- $response = phplist_subscribe_to_list($form_state['values']['email'], MAILING_LIST_LIST_ID);
- // Handle any user-facing errors.
- _phplist_handle_response($response);
+  // Subscribe to list.
+  $response = phplist_subscribe_to_list($form_state['values']['email'], PHPLIST_LIST_LIST_ID);
+  // Handle any user-facing errors.
+  _phplist_handle_response($response, PHPLIST_LIST_LIST_ID);
 }
 
 /**
@@ -93,124 +117,72 @@ function phplist_subscribe_email_form_submit($form, &$form_state) {
  * @return string
  */
 function phplist_subscribe_to_list($email, $list_id) {
- db_set_active(PHPLIST_DBNAME);
-
  // Is this email already in our system?
  $found_email = FALSE;
- $result = db_query('select id from phplist_user_user where email = %s', $email);
+ db_set_active(PHPLIST_DBNAME);
+ $result = db_query('select u.id from phplist_user_user u where u.email = :email',array(':email' => $email));
 
- if(db_affected_rows() > 0) {
+ if($result->rowCount() > 0) {
    // Yes, we already have the email in our db
    $found_email = TRUE;
-   $record = db_fetch_array($result);
-   $userid = $record['id'];
+   $userid = $record->fetchField();
 
-   // Is the email already subscribed to the ChristianVolunteering mailinglist?
-   $result = db_query('select 1 from phplist_userlist where listid = %d and userid = %d', 
-    $list_id, $id);
-   if(db_affected_rows() == 0) {
+   // Is the email already subscribed to the mailing list?
+   $result = db_query('select userid from phplist_listuser where listid = :listid and userid = :userid', array(':listid' => $list_id, ':userid' => $userid));
+   if($result->rowCount() > 0) {
      // Yes, the email is already subscribed
      return PHPLIST_LIST_RETURN_CODE_ALREADY_SUBSCRIBED;
    }
  }
 
- // We're going to do a bunch of inserts...transactionalize them.
- $result = db_query('start transaction');
-
- if(!$found_email) {
-   // The email was not already in our db, so we need to insert it.
-   $result = db_query('insert into phplist_user_user
-     (email, entered, modified, uniqid, htmlemail, subscribepage)
-     values(%s,now(),now(),MD5(concat(UNIX_TIMESTAMP(now()),round(rand()))),1,1)', $email);
-  $userid = db_last_insert_id();
-
-  // Update total users stat...
-  // Does this stat exist in the db?
-  $result = db_query('select 1 from phplist_userstats where item = \'total users\' and listid = 0');
-  if(db_affected_rows() > 0) {
-   // Yes, increment it
-   $result = db_query('update phplist_userstats
-     set item = item + 1, unixdate = UNIX_TIMESTAMP()
-     where listid = 0 and item = \'total users\'
-     limit 1');
-   if(!$result) {
-    _phplist_debug('update of phplist_userstats failed');
-    db_query('rollback');
-    return PHPLIST_LIST_RETURN_CODE_ERROR;
+ // The following inserts may fail, so wrap in a transaction for rollback.
+ $transaction = db_transaction();
+ try {
+   if(!$found_email) {
+     // The email was not already in our db, so we need to insert it.
+     $result = db_insert('phplist_user_user')
+       ->fields(array(
+         'email' => $email,
+         'entered' => date("Y-m-d H:i:s"),
+         'modified' => date("Y-m-d H:i:s"),
+         'uniqid' => uniqid(),
+         'htmlemail' => 1,
+         'subscribepage' => 1
+       ))
+       ->execute();
+    // Get the user id for the newly inserted user
+    $userid = db_query("select id from phplist_user_user where email = :email", array(':email' => $email))->fetchField();
    }
-  }
-  else {
-   // No, insert it with a value of 1
-   $result = db_query('insert into phplist_userstats
-     (unixdate, item, listid, value)
-     values(UNIX_TIMESTAMP(), \'total users\', 0, 1)');
-   if(!$result) {
-    _phplist_debug('insert into phplist_userstats failed');
-    db_query('rollback');
-    return PHPLIST_LIST_RETURN_CODE_ERROR;
-   }
-  }
- }
 
- // Insert subscription.
- $result = db_query('insert into phplist_listuser
-   (userid, listid, entered, modified)
-   values (%d,%d,NOW(),NOW())', $userid, $list_id);
- if(!$result) {
-  _phplist_debug('insert into phplist_listuser failed');
-  db_query('rollback');
-  return PHPLIST_LIST_RETURN_CODE_ERROR;
- }
+   // Insert subscription.
+   $result = db_insert('phplist_listuser')
+     ->fields(array(
+       'userid' => $userid,
+       'listid' => $list_id,
+       'entered' => date("Y-m-d H:i:s"),
+       'modified' => date("Y-m-d H:i:s")
+     ))
+     ->execute();
 
- // Update subscription stat
- // Does this stat exist in the db?
- $result = db_query('select 1 from phplist_userstats where item = \'subscribe\' and listid = %d', 
-   $list_id);
- if(!$result) {
-  _phplist_debug('stat not in phplist_userstats');
-  db_query('rollback');
-  return PHPLIST_LIST_RETURN_CODE_ERROR;
+   // Insert user history.
+   $result = db_insert('phplist_user_user_history')
+     ->fields(array(
+       'userid' => $userid,
+       'ip' => $_SERVER['REMOTE_ADDR'],
+       'date' => date("Y-m-d H:i:s"),
+       'summary' => TEXT_SUMMARY,
+       'detail' => TEXT_DETAIL,
+       'systeminfo' => _phplist_get_sysinfo()
+     ))
+     ->execute();
  }
- if(db_affected_rows() > 0) {
-   // Yes, increment it
-   $result = db_query('update phplist_userstats
-     set item = item + 1, unixdate = UNIX_TIMESTAMP()
-     where listid = %d and item = \'subscribe\'
-     limit 1', $list_id);
-   if(!$result) {
-     db_query('rollback');
-     return PHPLIST_LIST_RETURN_CODE_ERROR;
-   }
+ catch(Exception $e) {
+   $transaction->rollback();
+   db_set_active();
+   _phplist_debug('Exception ' . $e::toString);
  }
- else {
-   // No, insert it with a value of 1
-   $result = db_query("insert into phplist_userstats
-     (unixdate, item, listid, value)
-     values(UNIX_TIMESTAMP(), 'subscribe', %d, 1)", $list_id);
-   if(!$result) {
-     db_query('rollback');
-     return PHPLIST_LIST_RETURN_CODE_ERROR;
-   }
- }
-
- // Insert user history.
- $result = db_query("insert into phplist_user_user_history
-   (userid, ip, date, summary, detail, systeminfo)
-   VALUES(%d,%s,NOW(),'Subscription',
-   'Subscribe page: 1   List Membership:   * ChristianVolunteering Marketing',%s", 
-   $userid, $_SERVER['REMOTE_ADDR'], _phplist_get_sysinfo());
- if(!$result) {
-   db_query('rollback');
-   return PHPLIST_LIST_RETURN_CODE_ERROR;
- }
-  
- $result = db_query('commit');
- if(!$result) {
-   db_query('rollback');
-   return PHPLIST_LIST_RETURN_CODE_ERROR;
- }
-
-  return PHPLIST_LIST_RETURN_CODE_SUCCESS;
+ db_set_active();
+ return PHPLIST_LIST_RETURN_CODE_SUCCESS;
 }
 
 /**
@@ -224,7 +196,7 @@ function _phplist_handle_response($response, $list_id) {
     $listname = 'default';
   }
   switch($response) {
-    case PHPLIST_LIST_RETURN_CODE_ALREADY_SUBSCRIBED:
+    case PHPLIST_LIST_RETURN_CODE_SUCCESS:
       drupal_set_message(t('You have been subscribed to the %listname list.',
         array('%listname' => $listname)));
       break;
@@ -244,10 +216,10 @@ function _phplist_handle_response($response, $list_id) {
  * Helper function: Gets the name of a PHPList list by id.
  */
 function _phplist_get_listname($list_id) {
- db_set_active(PHPLIST_DBNAME);
- $listname = html_entity_decode(db_result('select name from phplist_list where id = %d', $list_id));
- _phplist_debug($listname, 'listname');
- return $listname;
+  db_set_active(PHPLIST_DBNAME);
+  $listname = html_entity_decode(db_query('select name from phplist_list where id = :list_id', array(':list_id' => $list_id))->fetchField());
+  db_set_active();
+  return $listname;
 }
 
 /**
@@ -268,10 +240,9 @@ function _phplist_get_sysinfo() {
 /**
  * Utility function: Used for debugging the subscription function.
  * 
- * @todo: Remove when done debugging.
  */
 function _phplist_debug($value, $label = 'error') {
  if(module_exists('devel') && PHPLIST_MODULE_IN_DEBUG == TRUE) {
-   dpm($value, $label);
+   dpm($value, $label);  
  }
 }
